@@ -1,0 +1,16 @@
+[project]
+name = "phoenix-card-tools"
+version = "0.1.0"
+description = "Read eUICC / SIM cards and download eSIM profiles through a Phoenix (USB-serial) reader"
+requires-python = ">=3.9"
+dependencies = [
+    "pyserial>=3.5",
+    "requests>=2.28",
+]
+
+[project.optional-dependencies]
+# Only needed to run the local test SM-DP+ (osmo-smdpp.py). The four tools in
+# this directory do not import it.
+smdp = [
+    "pySim @ git+https://github.com/osmocom/pysim",
+]

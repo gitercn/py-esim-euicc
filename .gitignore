@@ -1,0 +1,16 @@
+# Vendored osmocom pysim (full clone with its own .git) and its generated state.
+# The tools here no longer import it; only start-smdpp.bat needs it, optionally.
+pysim/
+smdpp-data/
+
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+uv.lock
+
+# Local captures / notes
+*.log
+*.pcap
+euicc_probe.log
