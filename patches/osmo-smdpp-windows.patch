@@ -1,18 +1,24 @@
 diff --git a/osmo-smdpp.py b/osmo-smdpp.py
-index 024e861..57e357c 100755
+index 024e861..92183a9 100755
 --- a/osmo-smdpp.py
 +++ b/osmo-smdpp.py
-@@ -955,7 +955,13 @@ def main(argv):
+@@ -955,7 +955,19 @@ def main(argv):
              with open(cert_pempath, 'wb') as pem_file:
                  pem_file.write(pem_cert)
  
 -        SERVER_STRING = f'ssl:{args.port}:privateKey={cert_skpath}:certKey={cert_pempath}:dhParameters={dhparam_path}:interface={args.host}'
-+        # Twisted parses the endpoint string as a ":"-separated, "\"-escaped
-+        # description, so Windows backslashes must be normalised to "/".
-+        _posix = lambda p: str(p).replace('\\', '/')
-+        SERVER_STRING = (f'ssl:{args.port}:privateKey={_posix(cert_skpath)}'
-+                         f':certKey={_posix(cert_pempath)}'
-+                         f':dhParameters={_posix(dhparam_path)}'
++        # Twisted endpoint descriptions use ":" as a separator and "\" as an
++        # escape character.  Interpolating a raw filesystem path breaks on
++        # Windows: backslashes get consumed as escapes and the drive letter's
++        # ":" terminates the value early.  Escape both instead of assuming
++        # POSIX-style paths.
++        def _endpoint_path(p):
++            return str(p).replace('\\', '\\\\').replace(':', '\\:')
++
++        SERVER_STRING = (f'ssl:{args.port}'
++                         f':privateKey={_endpoint_path(cert_skpath)}'
++                         f':certKey={_endpoint_path(cert_pempath)}'
++                         f':dhParameters={_endpoint_path(dhparam_path)}'
 +                         f':interface={args.host}')
          print(SERVER_STRING)
  
