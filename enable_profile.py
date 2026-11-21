@@ -18,8 +18,16 @@ there" and "the phone can select ADF.USIM".
 import sys
 import time
 
-from euicc_lpa import AID, Phoenix
-from euicc_lpa import tlv
+from euicc_lpa import AID, ISDR_AIDS, Phoenix
+from euicc_lpa import parse_tlv, store_data, tlv
+
+
+def walk(data):
+    """把 parse_tlv 摊平成 (tag, value) 序列，省得为嵌套再写一遍循环。"""
+    for tag, value, constructed in parse_tlv(data):
+        yield tag, value
+        if constructed:
+            yield from walk(value)
 
 # What we report on after enabling: the stock UPP AID first (that is what a
 # freshly loaded test profile registers), then the real ones.
@@ -35,8 +43,6 @@ def main():
                   if a.startswith("--iccid=")), None)
     refresh = "--refresh" in sys.argv
 
-    from euicc_download import EuiccCard
-
     ph = Phoenix(port)
     atr = ph.reset()
     print(f"ATR: {atr.hex(' ').upper() or '(nothing)'}")
@@ -46,18 +52,50 @@ def main():
         return 1
     time.sleep(0.2)
 
-    es = EuiccCard(ph)
-    es.select_isdr()
-    profiles = es.get_profiles_info()
+    # 列 profile 只用 ES10c GetProfilesInfo，euicc_lpa 自己就能做。
+    # euicc_download 顶部 import requests；没装 requests 时至少 --list
+    # 不该 traceback，所以那条路径到此为止，不碰 EuiccCard。
+    selected = None
+    for aid in ISDR_AIDS:
+        for p2 in ("04", "0C"):
+            _d, sw = ph.send(f"00A4{p2}00{len(aid)//2:02X}{aid}")
+            if sw.startswith("90") or sw.startswith("61"):
+                selected = aid
+                break
+        if selected:
+            break
+    if not selected:
+        print("选不到 ISD-R")
+        ph.close()
+        return 1
+
+    data, sw = store_data(ph, "BF2D00")
     print("\n已安装的 profile:")
-    for ic, state in profiles:
-        mark = "enabled" if state == 1 else f"state={state}"
-        print(f"  {ic.hex().upper()}  {mark}")
+    profiles = []
+    cur = None
+    for tag, value in walk(data):
+        if tag == 0xE3:
+            cur = {"iccid": b"", "state": None}
+            profiles.append(cur)
+        elif cur is not None and tag == 0x5A:
+            cur["iccid"] = value
+        elif cur is not None and tag == 0x9F70 and value:
+            cur["state"] = value[0]
+    for p in profiles:
+        mark = "enabled" if p["state"] == 1 else f"state={p['state']}"
+        ic = p["iccid"].hex().upper()
+        # SGP.22 的 5A 是 EF.ICCID 原始字节按高半字节在前打印的，
+        # 给人看要跟 sim_dump 一样低半字节优先。
+        human = "".join(f"{b & 0xF:X}{b >> 4:X}" for b in p["iccid"]).rstrip("F")
+        print(f"  {ic}  -> {human}  {mark}")
     if iccid is None:
         print("\n没给 --iccid=，只列不切")
         ph.close()
         return 0
 
+    from euicc_download import EuiccCard
+    es = EuiccCard(ph)
+    es.select_isdr()
     target = bytes.fromhex(iccid if len(iccid) % 2 == 0 else iccid + "F")
     if "--delete" in sys.argv:
         # ES10c DeleteProfile (BF33 { 5A <iccid> }).  Needed when a re-install

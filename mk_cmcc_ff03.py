@@ -239,6 +239,10 @@ def main():
     opts = {"imsi": None, "spn": "China Mobile", "spn-flag": "01", "iccid": None,
             "r1r5": "20132F495B",
             "ki": None, "opc": None,
+            # keep = 照抄源 UPP；milenage(1) / usim-test(3) / tuak(2) 可显式指定。
+            # 想要在真网注册必须用 milenage(1)：运营商 AuC 用的是 Milenage，
+            # usim-test(3) 是 TS 31.102 Annex F 的公开测试算法，而且忽略 OPc。
+            "algo": "keep",
             # alignment with a reference card (all optional; unset = keep UPP)
             "acc": None, "ad": None, "hpplmn": None, "smsc": None,
             "fplmn": None, "plmn": None, "oplmn": None, "hplmn": None,
@@ -279,6 +283,12 @@ def main():
         ki, opc = bytes.fromhex(opts["ki"]), bytes.fromhex(opts["opc"])
         if len(ki) != 16 or len(opc) != 16:
             raise SystemExit("--ki= and --opc= must each be 16 bytes (32 hex)")
+    algo = opts["algo"]
+    algo_id = {"keep": None, "milenage": 1, "tuak": 2, "usim-test": 3}.get(algo)
+    if algo_id is None and algo != "keep":
+        raise SystemExit("--algo must be keep / milenage / tuak / usim-test")
+    if algo_id is not None and not ki:
+        raise SystemExit("--algo requires --ki= and --opc= (A4 只在这条路径里改)")
 
     der = open(src, "rb").read()
     elements, off = [], 0
@@ -452,6 +462,14 @@ def main():
             params = cfg[1]
             params["key"] = ki
             params["opc"] = opc
+            if algo_id is not None:
+                old = params.get("algorithmID")
+                params["algorithmID"] = algo_id
+                # algorithmOptions 在 usim-test 里是 02，Milenage/TUAK 按
+                # pysim 的 set_milenage()/set_tuak() 都是 00。
+                params["algorithmOptions"] = b"\x00"
+                print(f"  akaParameter algorithmID: {old} -> {algo_id} ({algo})"
+                      "  options 02 -> 00")
             elements[i] = pe.to_der()
             seen += 1
         if not seen:

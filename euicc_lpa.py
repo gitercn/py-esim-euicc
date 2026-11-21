@@ -325,17 +325,6 @@ def store_data(ph, payload_hex, label=""):
 # ------------------------------------------------------- USIM filesystem side
 # After a profile is enabled the eUICC runs a REFRESH, which in a Phoenix reader
 # is just an RTS toggle. Only then does ADF.USIM exist on the contact interface.
-USIM_AIDS = [
-    "A0000000871002FF33FFFF8900000100",
-    "A0000000871002FF33FFFF89000001",
-    "A0000000871002FF86FFFF8900000100",
-    "A0000000871002FF86FFFF89FFFFFFFF",
-]
-MF = "3F00"
-DF_7FF0 = "7FF0"
-EF_FF03 = "FF03"
-
-
 # ---------------------------------------------------------------- AID table
 # Every AID that appears anywhere in this repo. The per-script lists below
 # compose from these, so the hex string itself lives in exactly one place.
@@ -348,6 +337,20 @@ AID = {
     "isim":   "A0000000871004FF33FFFF8900000100",
     "csim":   "A0000000871006FF33FFFF8900000100",
 }
+
+USIM_AIDS = [
+    # 必须排第一。这张 eUICC 的 EF.DIR 里登记的还是标准 16B AID，但真正能
+    # SELECT 成功的只有 stock 这条 12B AID（实测 9000，其他全是 6A82）。
+    # 少了它，sim_dump 会打出一行「AID select 全 6A82」，看着像卡废了。
+    AID["stock"],
+    AID["usim"],
+    AID["usim15"],
+    AID["cmcc"],
+    AID["cmcc2g"],
+]
+MF = "3F00"
+DF_7FF0 = "7FF0"
+EF_FF03 = "FF03"
 
 # What probe_after_install.py reports on, in the order it prints them. A
 # superset of USIM_AIDS: it also covers what a phone might ask for (ISIM/CSIM)

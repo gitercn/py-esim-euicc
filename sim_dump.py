@@ -175,8 +175,14 @@ def main():
         print("ACC   :", d.hex().upper())
     d = sim.read_bin(EF.AD, 4)
     if d:
+        # TS 31.102 EF_AD: b0=MS operation mode, b1=additional info,
+        # b2=RFU, b3=MNC 长度。之前取 d[0] 会把 `00000002` 解成 "MNC len=0"，
+        # 而 46000 明明是 2 位 MNC —— 正确值是 d[3]=2（pysim 的 EF_AD
+        # 也把这条测试向量解成 mnc_len=2）。
+        mode = d[0] & 0x0F
         print("EF_AD :", d.hex(" ").upper(),
-              f"(MNC len={d[0] & 0x0F}, OPLMN={d[1:4].hex().upper()})")
+              f"(MNC len={d[3] if len(d) >= 4 else '?'}, "
+              f"op mode={mode}, extra={d[1:3].hex().upper()})")
     d = sim.read_bin(EF.SPN, 17)
     if d:
         raw = d[1:].rstrip(b"\xFF")
@@ -233,11 +239,17 @@ def main():
         sim.select(root)
         rand = bytes(range(16))
         # case 4: Lc=16 RAND, Le=12 (SRES 4 + Kc 8)
-        apdu = bytes([0xA0, 0x88, 0x00, 0x00, 0x10]) + rand + bytes([12])
-        payload, sw = ph.transceive(apdu)
-        print(f"AUTH  : {sw.hex().upper()}  {payload.hex().upper() or '(empty)'}"
-              f"   <- SRES(4)+Kc(8); 有返回只说明 applet 活着且有一把密钥，"
-              f"不说明这把密钥是对的")
+        # 老 USIM 卡认 CLA=A0，eUICC 上的 applet 认 CLA=00，两种都试。
+        for cla in (0xA0, 0x00):
+            apdu = bytes([cla, 0x88, 0x00, 0x00, 0x10]) + rand + bytes([12])
+            payload, sw = ph.transceive(apdu)
+            print(f"AUTH(CLA={cla:02X}): {sw.hex().upper()}  "
+                  f"{payload.hex().upper() or '(empty)'}")
+            if sw[0] in (0x90, 0x9F, 0x61):
+                break
+        print("  <- 有返回只说明 applet 活着且有一把密钥，不说明密钥是对的。"
+              "eUICC 上常见 6E00(CLA 不对)/9862(要完整 3G AUTN)，"
+              "判断密钥是否真的可用只能靠实网附着。")
 
     if ph.echo_errors:
         print(f"        (echo errors: {ph.echo_errors})")
