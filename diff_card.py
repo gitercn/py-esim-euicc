@@ -12,47 +12,28 @@ equal -- the padding is not a difference anyone cares about.
 """
 import sys
 
-from euicc_lpa import Phoenix
+from euicc_lpa import EF, EFS, REC_LENS, ROOTS, TELECOM, Phoenix
 
-# (label, FID, structure, record size for LF)
-# The record sizes here are only a *first guess*: a card answers 6700 (wrong
+# Which files to compare, in the order they are printed. FID, structure and the
+# record-size hint all come from the shared table in euicc_lpa.py.
+# The record sizes there are only a *first guess*: a card answers 6700 (wrong
 # length) for any Le that is not exactly the record length, so read_card()
 # falls back to REC_LENS and keeps whichever one the card accepts.
-FIELDS = [
-    ("EF.IMSI",     "6F07", "tr", 0),
-    ("EF.ACC",      "6F78", "tr", 0),
-    ("EF.AD",       "6FAD", "tr", 0),
-    ("EF.SPN",      "6F46", "tr", 0),
-    ("EF.FPLMN",    "6F7B", "tr", 0),
-    ("EF.PLMNwAcT", "6F60", "tr", 0),
-    ("EF.OPLMNwAcT", "6F61", "tr", 0),
-    ("EF.HPLMNwAcT", "6F62", "tr", 0),
-    ("EF.UST",      "6F38", "tr", 0),
-    ("EF.HPPLMN",   "6F31", "tr", 0),
-    ("EF.MSISDN",   "6F40", "lf", 0x22),
-    ("EF.SMSP",     "6F42", "lf", 0x28),
+DIFF_FILES = [
+    "EF.IMSI", "EF.ACC", "EF.AD", "EF.SPN", "EF.FPLMN",
+    "EF.PLMNwAcT", "EF.OPLMNwAcT", "EF.HPLMNwAcT", "EF.UST",
+    "EF.HPPLMN", "EF.MSISDN", "EF.SMSP",
 ]
-
-# READ RECORD only succeeds when Le is exactly the record length, and this card
-# does not return an FCP to read it from, so try the sizes seen in the wild.
-REC_LENS = (0x1C, 0x2A, 0x22, 0x28, 0x0C, 0x10, 0x14, 0x18,
-            0x1E, 0x20, 0x24, 0x26, 0x2C, 0x30, 0x40, 0x50)
+FIELDS = [(name, getattr(EF, name[3:])) for name in DIFF_FILES]
 
 
-# The subscription lives in a different DF depending on the card: a USIM keeps
-# it in ADF.USIM (7FD0), a 2G SIM in DF.GSM (7F20), some cards in 7FFF. Reading
-# only one of them is how sim_dump.py used to print ICCID and nothing else.
-ROOTS = ("7FD0", "7FFF", "7F20")
-# Files a 2G card keeps in DF.TELECOM instead.
-TELECOM = "7F10"
+def der_key(label):
+    """pysim decodes each EF under a lower-case hyphenated key.
 
-DER_NAME = {  # label -> pysim decoded key
-    "EF.IMSI": "ef-imsi", "EF.ACC": "ef-acc", "EF.AD": "ef-ad",
-    "EF.SPN": "ef-spn", "EF.FPLMN": "ef-fplmn",
-    "EF.PLMNwAcT": "ef-plmnwact", "EF.OPLMNwAcT": "ef-oplmnwact",
-    "EF.HPLMNwAcT": "ef-hplmnwact", "EF.UST": "ef-ust",
-    "EF.HPPLMN": "ef-hpplmn", "EF.MSISDN": "ef-msisdn", "EF.SMSP": "ef-smsp",
-}
+    Verified against pysim's own output for all 12 names above:
+    EF.PLMNwAcT -> "ef-plmnwact", EF.HPPLMN -> "ef-hpplmn", ...
+    """
+    return label.lower().replace(".", "-")
 
 
 def read_card(port):
@@ -81,7 +62,8 @@ def read_card(port):
     print(f"subscription root: {root or '(none)'}")
 
     out = {}
-    for label, fid, struct, rec in FIELDS:
+    for label, fid in FIELDS:
+        struct, rec = EFS[fid][1:]
         out[label] = None
         # try the subscription root first, then DF.TELECOM (2G layout)
         for df in [root, TELECOM]:
@@ -138,8 +120,8 @@ def read_der(path):
         if tag not in (0xB3, 0xB4):
             continue
         pe = ProfileElement.from_der(der[start:off], pe_sequence=None)
-        for label, key in DER_NAME.items():
-            f = pe.files.get(key)
+        for label in DIFF_FILES:
+            f = pe.files.get(der_key(label))
             if f is not None and label not in out:
                 out[label] = f._body or b""
     return out
@@ -186,7 +168,7 @@ def main():
     print(f"  {'field':<13} {'card':<34} {'profile':<34} ")
     print(f"  {'-'*13} {'-'*34} {'-'*34} ")
     same = diff = 0
-    for label, _fid, _s, _r in FIELDS:
+    for label, _fid in FIELDS:
         c, p = card.get(label), prof.get(label)
         cs = "(absent)" if c is None else strip_ff(c).hex().upper()
         ps = "(absent)" if p is None else strip_ff(p).hex().upper()
@@ -196,7 +178,7 @@ def main():
         print(f"  {label:<13} {cs[:32]:<34} {ps[:32]:<34} "
               f"{'same' if eq else 'DIFF'}")
     print(f"\n{same} same, {diff} different")
-    for label, _fid, _s, _r in FIELDS:
+    for label, _fid in FIELDS:
         c, p = card.get(label), prof.get(label)
         if c is not None and p is not None and len(c) != len(p):
             print(f"  note: {label} is {len(c)}B on the card, {len(p)}B in the "

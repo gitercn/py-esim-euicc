@@ -9,6 +9,7 @@ If this works, the same byte sequence is what the Flutter app must produce.
 """
 import sys
 import time
+from types import SimpleNamespace
 
 import serial
 
@@ -332,6 +333,68 @@ USIM_AIDS = [
 MF = "3F00"
 DF_7FF0 = "7FF0"
 EF_FF03 = "FF03"
+
+
+# ---------------------------------------------------------------- AID table
+# Every AID that appears anywhere in this repo. The per-script lists below
+# compose from these, so the hex string itself lives in exactly one place.
+AID = {
+    "stock":  "A0000000871002FF49FF0589",           # 12B, SGP.26 test UPP
+    "usim":   "A0000000871002FF33FFFF8900000100",   # standard USIM, 16B
+    "usim15": "A0000000871002FF33FFFF89000001",     # the 15B form some cards use
+    "cmcc":   "A0000000871002FF86FFFF8900000100",   # CMCC variant
+    "cmcc2g": "A0000000871002FF86FFFF89FFFFFFFF",   # the 2G working card's AID
+    "isim":   "A0000000871004FF33FFFF8900000100",
+    "csim":   "A0000000871006FF33FFFF8900000100",
+}
+
+# What probe_after_install.py reports on, in the order it prints them. A
+# superset of USIM_AIDS: it also covers what a phone might ask for (ISIM/CSIM)
+# and what the stock test UPP registers.
+PROBE_AIDS = [AID["stock"], AID["usim"], AID["usim15"], AID["cmcc"],
+              AID["cmcc2g"], AID["isim"], AID["csim"]]
+
+
+# ---------------------------------------------------------------- EF table
+# One table, one truth. Every script that names a file by FID reads it from
+# here instead of hard-coding the hex, so a wrong FID gets fixed once.
+#   fid -> (name, structure, record length hint)
+#   "tr" = transparent (READ BINARY), "lf" = linear fixed (READ RECORD)
+EFS = {
+    "2FE2": ("EF.ICCID",     "tr", 0),
+    "6F07": ("EF.IMSI",      "tr", 0),
+    "6F78": ("EF.ACC",       "tr", 0),
+    "6FAD": ("EF.AD",        "tr", 0),
+    "6F46": ("EF.SPN",       "tr", 0),
+    "6F7B": ("EF.FPLMN",     "tr", 0),
+    "6F60": ("EF.PLMNwAcT",  "tr", 0),
+    "6F61": ("EF.OPLMNwAcT", "tr", 0),
+    "6F62": ("EF.HPLMNwAcT", "tr", 0),
+    "6F38": ("EF.UST",       "tr", 0),
+    "6F31": ("EF.HPPLMN",    "tr", 0),
+    "6F08": ("EF.KEYS",      "tr", 0),
+    "6F40": ("EF.MSISDN",    "lf", 0x22),
+    "6F42": ("EF.SMSP",      "lf", 0x28),
+    "2F00": ("EF.DIR",       "lf", 0x21),
+    "FF03": ("EF.FF03",      "tr", 0),
+}
+
+# Name -> FID as attributes, so call sites read EF.IMSI instead of "6F07".
+EF = SimpleNamespace(**{name[3:]: fid for fid, (name, _s, _r) in EFS.items()})
+
+# The subscription lives in a different DF depending on the card: a USIM keeps
+# it in ADF.USIM (7FD0), a 2G SIM in DF.GSM (7F20), some in DF.TELECOM (7FFF).
+# Reading only one of them is how a USIM ends up looking empty.
+ROOTS = ("7FD0", "7FFF", "7F20")
+TELECOM = "7F10"
+# Some 2G cards keep EF.SMSP in DF.TELECOM instead of the subscription root, so
+# the lookup order puts it between the two GSM roots.
+ROOTS_WITH_TELECOM = (ROOTS[0], TELECOM, ROOTS[2])
+
+# READ RECORD only succeeds when Le is exactly the record length, and these
+# cards return no FCP to read it from, so try the sizes seen in the wild.
+REC_LENS = (0x1C, 0x2A, 0x22, 0x28, 0x0C, 0x10, 0x14, 0x18,
+            0x1E, 0x20, 0x24, 0x26, 0x2C, 0x30, 0x40, 0x50)
 
 
 def select_fid(ph, fid):

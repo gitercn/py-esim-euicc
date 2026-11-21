@@ -16,17 +16,11 @@ there is exactly one implementation of it.
 """
 import sys
 
-from euicc_lpa import Phoenix
+from euicc_lpa import (EF, ROOTS, ROOTS_WITH_TELECOM, USIM_AIDS, Phoenix)
 
 PORT = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1].upper().startswith("COM") else "COM4"
 BAUD = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 19200
 DO_AUTH = "--auth" in sys.argv
-
-USIM_AIDS = [
-    "A0000000871002FF33FFFF8900000100",
-    "A0000000871002FF33FFFF89000001",
-    "A0000000871002FF86FFFF8900000100",
-]
 
 
 class Sim:
@@ -137,16 +131,16 @@ def main():
 
     sim = Sim(ph)
     sim.select("3F00")
-    print("ICCID :", bcd(sim.read_bin("2FE2", 10)).rstrip("F"))
+    print("ICCID :", bcd(sim.read_bin(EF.ICCID, 10)).rstrip("F"))
 
     # Which application root holds the subscription? USIM -> 7FD0,
     # 2G SIM -> 7F20, some cards -> 7FFF.
     root, imsi = None, ""
-    for fid in ("7FD0", "7FFF", "7F20"):
+    for fid in ROOTS:
         sim.select("3F00")
         if not sim.select(fid):
             continue
-        d = sim.read_bin("6F07", 9)
+        d = sim.read_bin(EF.IMSI, 9)
         if d and len(d) >= 9:
             root, imsi = fid, swap_imsi(d[1:1 + d[0]])
             break
@@ -176,32 +170,32 @@ def main():
     sim.select("3F00")
     sim.select(root)
 
-    d = sim.read_bin("6F78", 2)
+    d = sim.read_bin(EF.ACC, 2)
     if d:
         print("ACC   :", d.hex().upper())
-    d = sim.read_bin("6FAD", 4)
+    d = sim.read_bin(EF.AD, 4)
     if d:
         print("EF_AD :", d.hex(" ").upper(),
               f"(MNC len={d[0] & 0x0F}, OPLMN={d[1:4].hex().upper()})")
-    d = sim.read_bin("6F46", 17)
+    d = sim.read_bin(EF.SPN, 17)
     if d:
         raw = d[1:].rstrip(b"\xFF")
         while raw and raw[0] < 0x20:
             raw = raw[1:]
         print("SPN   :", raw.decode("latin-1", "replace"))
-    d = sim.read_bin("6F7B", 12)
+    d = sim.read_bin(EF.FPLMN, 12)
     if d:
         print("FPLMN :", " ".join(plmn_list(d, 3)) or "(none)")
-    d = sim.read_bin("6F60", 170)
+    d = sim.read_bin(EF.PLMNwAcT, 170)
     if d:
         print("PLMNSEL:", " ".join(plmn_list(d)) or "(none)")
-    d = sim.read_bin("6F62", 250)
+    d = sim.read_bin(EF.HPLMNwAcT, 250)
     if d:
         print("HPLMN :", " ".join(plmn_list(d)) or "(none)")
-    d = sim.read_bin("6F38", 15)
+    d = sim.read_bin(EF.UST, 15)
     if d:
         print("UST   :", d.hex().upper())
-    d = sim.read_bin("6F08", 33)
+    d = sim.read_bin(EF.KEYS, 33)
     if d:
         # EF.KEYS is 33 bytes: key-set version + K + OPc in the SAIP layout, but
         # in a downloaded profile it is left as 07 FF*32 -- the eUICC's
@@ -213,15 +207,15 @@ def main():
               "  (07 FF*32 = 未个人化，正常)" if not tail else "")
 
     sim.select("3F00")
-    d = sim.read_bin("FF03", 5)
+    d = sim.read_bin(EF.FF03, 5)
     if d:
         print("R1-R5 :", d.hex().upper())
 
     smsp = None
-    for df in ("7FD0", "7F10", "7F20"):
+    for df in ROOTS_WITH_TELECOM:
         sim.select("3F00")
         if sim.select(df):
-            smsp = decode_smsp(sim.read_rec("6F42", 1, 0x24))
+            smsp = decode_smsp(sim.read_rec(EF.SMSP, 1, 0x24))
             if smsp:
                 break
     if smsp:
@@ -229,7 +223,7 @@ def main():
 
     sim.select("3F00")
     sim.select(root)
-    d = sim.read_rec("6F40", 1, 0x22)
+    d = sim.read_rec(EF.MSISDN, 1, 0x22)
     if d:
         al = d[0]
         print("MSISDN:", bcd(d[2 + al:]).rstrip("F") or "(empty)")

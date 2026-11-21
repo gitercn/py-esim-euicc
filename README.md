@@ -1,8 +1,8 @@
 # 凤凰读卡器 / eSIM eUICC 工具
 
-PL2303 USB 转串口读卡器上的一套 SIM / eUICC 小工具。**所有脚本共用 `euicc_lpa.py` 里的
-`Phoenix` 类**（过程字节握手、`0x60` NULL 跳过、`Le=0`→256、`61xx` 链）。新脚本直接
-`from euicc_lpa import Phoenix`，不要再写一份。
+PL2303 USB 转串口读卡器上的一套 SIM / eUICC 小工具。**所有脚本共用 `euicc_lpa.py`**：
+`Phoenix` 管传输（过程字节握手、`0x60` NULL 跳过、`Le=0`→256、`61xx` 链），`EFS` / `EF` /
+`AID` 是 FID 和 AID 的唯一出处。新脚本直接 import，不要再写一份 `"6F07"` 这种字面量。
 
 ## 驱动
 

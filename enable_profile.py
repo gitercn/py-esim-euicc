@@ -18,15 +18,12 @@ there" and "the phone can select ADF.USIM".
 import sys
 import time
 
-from euicc_lpa import Phoenix
+from euicc_lpa import AID, Phoenix
 from euicc_lpa import tlv
 
-AIDS = [
-    "A0000000871002FF49FF0589",              # stock test UPP, 12B
-    "A0000000871002FF33FFFF8900000100",      # standard USIM, 16B
-    "A0000000871002FF86FFFF8900000100",      # CMCC variant
-    "A0000000871004FF33FFFF8900000100",      # ISIM
-]
+# What we report on after enabling: the stock UPP AID first (that is what a
+# freshly loaded test profile registers), then the real ones.
+AIDS = [AID["stock"], AID["usim"], AID["cmcc"], AID["isim"]]
 
 
 def main():

@@ -10,19 +10,9 @@ Three questions, in the order that matters:
 """
 import sys
 
-from euicc_lpa import Phoenix
+from euicc_lpa import PROBE_AIDS as AIDS, Phoenix
 
 PORT = sys.argv[1] if len(sys.argv) > 1 else "COM4"
-
-AIDS = [
-    "A0000000871002FF49FF0589",              # stock test UPP, 12B
-    "A0000000871002FF33FFFF8900000100",      # standard USIM, 16B
-    "A0000000871002FF33FFFF89000001",        # 15B
-    "A0000000871002FF86FFFF8900000100",      # CMCC variant
-    "A0000000871002FF86FFFF89FFFFFFFF",      # the 2G working card's AID
-    "A0000000871004FF33FFFF8900000100",      # ISIM
-    "A0000000871006FF33FFFF8900000100",      # CSIM
-]
 
 
 def main():
