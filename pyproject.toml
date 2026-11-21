@@ -9,8 +9,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Only needed to run the local test SM-DP+ (osmo-smdpp.py). The four tools in
-# this directory do not import it.
+# The four tools import pySim straight from the vendored `pysim/` clone via
+# sys.path, so they do not need this extra. It exists for running the local test
+# SM-DP+ (osmo-smdpp.py), which needs pySim's smpp dependencies as well.
 smdp = [
     "pySim @ git+https://github.com/osmocom/pysim",
 ]

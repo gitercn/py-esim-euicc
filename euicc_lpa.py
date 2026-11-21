@@ -101,27 +101,32 @@ def dump(data, indent=0):
 # ------------------------------------------------------------------ transport
 class Phoenix:
     def __init__(self, port=PORT, baud=BAUD):
-        self.s = serial.Serial(
-            port, baud, bytesize=8, parity=serial.PARITY_EVEN, stopbits=2,
-            timeout=0.05, xonxoff=0, rtscts=0,
-        )
+        self.port = port
+        self.baud = baud
+        self.s = self._open()
         self.echo_errors = 0
+
+    def _open(self):
+        return serial.Serial(
+            self.port, self.baud, bytesize=8, parity=serial.PARITY_EVEN,
+            stopbits=2, timeout=0.05, xonxoff=0, rtscts=0,
+        )
 
     def close(self):
         self.s.close()
 
-    def reset(self, hold=0.30):
+    def _pulse(self, low, hold):
+        """One reset cycle. RTS low = reset asserted, high = card running."""
         self.s.rts = False
         self.s.dtr = False
-        time.sleep(0.30)
+        time.sleep(low)
         self.s.reset_input_buffer()
         self.s.rts = True
         time.sleep(hold)
         self.s.reset_input_buffer()
         self.s.rts = False
 
-        atr = b""
-        quiet = 0
+        atr, quiet = b"", 0
         end = time.time() + 3.0
         while time.time() < end:
             chunk = self.s.read(64)
@@ -132,6 +137,26 @@ class Phoenix:
                 quiet += 1
                 if atr and quiet > 15:
                     break
+        return atr
+
+    def reset(self, hold=0.30, pulses=4):
+        """Power-cycle the card and read its ATR.
+
+        This PL2303 reader is marginal at 19200 8E2: a fresh open sometimes
+        leaves the line idle-low and the read comes back as a run of 0x00,
+        and repeating the pulse on the same handle does not clear it. Closing
+        and reopening the port does. Retry until the answer looks like an ATR
+        (TS byte 0x3B/0x3F, not a run of zeros).
+        """
+        atr = b""
+        for i in range(pulses):
+            if i:
+                self.s.close()
+                time.sleep(0.40)
+                self.s = self._open()
+            atr = self._pulse(0.30 if i == 0 else 0.60, hold)
+            if len(atr) >= 2 and atr[0] in (0x3B, 0x3F) and atr.count(0) < len(atr):
+                return atr
         return atr
 
     def _tx(self, data):
@@ -188,8 +213,35 @@ class Phoenix:
             return b"", first + self._rx(1, 1.5)
         return first + self._rx(le - 1, 6.0), self._rx(2, 3.0)
 
-    def transceive(self, apdu):
+    def transceive_ext(self, apdu, sw_timeout=60.0):
+        """T=0 mapping of an extended case-3 APDU: 00 LcHi LcLo <data>.
+
+        The 5-byte header carries Lc=00; the two length bytes and the data go
+        in the data phase, after the procedure byte. This is the only way to
+        hand the card more than 255 bytes in a single command.
+        """
+        ins = apdu[1]
+        lc = (apdu[5] << 8) | apdu[6]
+        body = len(apdu) - 7
+        if body != lc:
+            raise ValueError(
+                f"malformed extended APDU: Lc={lc} but {body} data bytes")
+        self._tx(apdu[:5])
+        pb = self._first_byte(2.0)
+        if pb is None:
+            raise IOError(f"no procedure byte (echoErrors={self.echo_errors})")
+        if pb != ins:
+            # Card refused the header outright (usually 67xx / 6E00):
+            # do NOT push the payload, it would desynchronise the link.
+            sw2 = self._rx(1, 1.5)
+            return b"", bytes([pb]) + sw2
+        self._tx(apdu[5:])
+        return b"", self._read_sw(sw_timeout)
+
+    def transceive(self, apdu, _retry_6c=True):
         """T=0, case 1/2/3/4. Returns (data, sw)."""
+        if len(apdu) >= 7 and apdu[4] == 0x00:
+            return self.transceive_ext(apdu)
         ins, p3 = apdu[1], apdu[4]
         # GET RESPONSE with Le=0 means 256 bytes (ISO 7816-4).
         if ins == 0xC0 and p3 == 0:
@@ -212,6 +264,20 @@ class Phoenix:
         if pb is None:
             raise IOError(f"no procedure byte (echoErrors={self.echo_errors})")
 
+        # 6Cxx = "wrong Le, use xx". T=0 has no other way to say it, and the
+        # card sends no data with it. Treating 6C as SW1 and then reading
+        # p3-1 bytes as payload desynchronises the link -- which is why every
+        # READ BINARY whose Le did not match the file size used to come back
+        # empty and get skipped.
+        if not has_data and pb == 0x6C:
+            sw2 = self._rx(1, 1.5)
+            if not sw2:
+                return b"", b"\x6c\x00"
+            new_le = sw2[0]
+            if _retry_6c and new_le != apdu[4]:
+                return self.transceive(apdu[:4] + bytes([new_le]), _retry_6c=False)
+            return b"", b"\x6c" + sw2
+
         if has_data:
             if pb != ins:
                 sw2 = self._rx(1, 1.0)
@@ -224,11 +290,13 @@ class Phoenix:
         if pb == ins:
             body = self._rx(p3, 6.0)
             return body, self._read_sw()
-        # pb is already SW1
-        if p3 == 0:
-            return b"", bytes([pb]) + self._rx(1, 1.5)
-        body = bytes([pb]) + self._rx(p3 - 1, 6.0)
-        return body, self._read_sw()
+        # pb is SW1, so the card answered with a status word and no data at all
+        # (6700 wrong length, 6A82 file not found, 6981 wrong structure, ...).
+        # Reading p3-1 bytes here would eat the next command's bytes and leave
+        # the link desynchronised -- that is how a READ RECORD with a slightly
+        # wrong Le turned into "2B6700" and a dead session.
+        sw2 = self._rx(1, 1.5)
+        return b"", bytes([pb]) + sw2
 
     def send(self, apdu_hex):
         data, sw = self.transceive(bytes.fromhex(apdu_hex))
@@ -251,6 +319,60 @@ def store_data(ph, payload_hex, label=""):
         more, sw = ph.transceive(bytes([gr_cla, 0xC0, 0x00, 0x00, sw[1]]))
         data += more
     return data, sw.hex().upper()
+
+
+# ------------------------------------------------------- USIM filesystem side
+# After a profile is enabled the eUICC runs a REFRESH, which in a Phoenix reader
+# is just an RTS toggle. Only then does ADF.USIM exist on the contact interface.
+USIM_AIDS = [
+    "A0000000871002FF33FFFF8900000100",
+    "A0000000871002FF33FFFF89000001",
+    "A0000000871002FF86FFFF8900000100",
+]
+MF = "3F00"
+DF_7FF0 = "7FF0"
+EF_FF03 = "FF03"
+
+
+def select_fid(ph, fid):
+    """SELECT by FID. P2=0C first (no FCI), fall back to P2=00 + Le."""
+    sw = "0000"
+    for apdu in (f"00A4000C02{fid}", f"00A4000002{fid}00"):
+        _d, sw = ph.send(apdu)
+        if sw.startswith("90") or sw.startswith("61"):
+            return True
+    print(f"  SELECT {fid}: {sw}")
+    return False
+
+
+def select_usim(ph, aid=None):
+    """SELECT ADF.USIM. Returns the AID that worked, or None."""
+    for candidate in ([aid] if aid else USIM_AIDS):
+        _d, sw = ph.send(f"00A40400{len(candidate)//2:02X}{candidate}")
+        print(f"  SELECT ADF.USIM {candidate}: {sw}")
+        if sw.startswith("90") or sw.startswith("61"):
+            return candidate
+    return None
+
+
+def read_ff03(ph, length=5):
+    """Walk MF/FF03 then MF/7FF0/FF03 and return the file body, or None.
+
+    The card must already be reset with a profile enabled; this does not touch
+    ISD-R at all.
+    """
+    for path, steps in ((("3F00", "FF03"), [EF_FF03]),
+                        (("3F00", "7FF0", "FF03"), [DF_7FF0, EF_FF03])):
+        print(f"  [{'/'.join(path)}]")
+        if not select_fid(ph, MF):
+            continue
+        if not all(select_fid(ph, f) for f in steps):
+            continue
+        data, sw = ph.send(f"00B00000{length:02X}")
+        print(f"    READ {length}B: {sw}  {data.hex().upper()}")
+        if sw == "9000" and len(data) >= length:
+            return data
+    return None
 
 
 # ----------------------------------------------------------------------- main

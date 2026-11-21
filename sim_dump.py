@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Dump the public / user-visible fields of a GSM/USIM card.
 
-Works on a plain SIM as well as on a USIM: it only reads the files every card
-has. Secrets (EF_Kc, EF_BCCH key material, OPc/Ki containers) are deliberately
-not read.
+Works on a plain SIM as well as on a USIM. The USIM application lives in
+ADF.USIM (FID 7FD0), while a 2G-only SIM keeps EF.IMSI in DF.GSM (7F20) --
+reading only 7F20 is why a USIM looks empty. This tries both, plus AID select.
 
-    python sim_dump.py [COM4] [19200]
+Secrets (Ki/OPc/Kc) are deliberately not read: they are not reachable through
+READ BINARY at all. --auth runs one GSM algorithm round trip, which only shows
+that the USIM applet is alive and has *a* key, not that the key is right.
+
+    python sim_dump.py [COM4] [19200] [--auth]
 
 The transport (T=0 framing, NULL bytes, Le=0 handling) lives in euicc_lpa.py so
 there is exactly one implementation of it.
@@ -14,8 +18,15 @@ import sys
 
 from euicc_lpa import Phoenix
 
-PORT = sys.argv[1] if len(sys.argv) > 1 else "COM4"
-BAUD = int(sys.argv[2]) if len(sys.argv) > 2 else 19200
+PORT = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1].upper().startswith("COM") else "COM4"
+BAUD = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 19200
+DO_AUTH = "--auth" in sys.argv
+
+USIM_AIDS = [
+    "A0000000871002FF33FFFF8900000100",
+    "A0000000871002FF33FFFF89000001",
+    "A0000000871002FF86FFFF8900000100",
+]
 
 
 class Sim:
@@ -32,13 +43,17 @@ class Sim:
         payload, sw = self.ph.transceive(apdu)
         return payload, sw.hex().upper()
 
-    def select(self, fid, tries=3):
+    def select(self, fid, tries=2):
         for _ in range(tries):
             if self.apdu(0x00, 0xA4, 0x00, 0x0C, bytes.fromhex(fid))[1].startswith("9"):
                 return True
         return False
 
-    def read_bin(self, fid, n, tries=3):
+    def select_aid(self, aid):
+        _d, sw = self.apdu(0x00, 0xA4, 0x04, 0x00, bytes.fromhex(aid))
+        return sw.startswith("9"), sw
+
+    def read_bin(self, fid, n, tries=2):
         for _ in range(tries):
             if self.select(fid):
                 d, sw = self.apdu(0x00, 0xB0, 0x00, 0x00, le=n)
@@ -46,7 +61,7 @@ class Sim:
                     return d
         return b""
 
-    def read_rec(self, fid, rec, n, tries=3):
+    def read_rec(self, fid, rec, n, tries=2):
         for _ in range(tries):
             if self.select(fid):
                 d, sw = self.apdu(0x00, 0xB2, rec, 0x04, le=n)
@@ -66,8 +81,28 @@ def swap_imsi(raw):
     return s
 
 
+def dec_plmn(b3):
+    """3-byte PLMN -> '46000', or None for FFFFFF."""
+    if len(b3) < 3 or b3 == b"\xff\xff\xff":
+        return None
+    mcc1, mcc2 = b3[0] & 0x0F, b3[0] >> 4
+    mcc3, mnc3 = b3[1] & 0x0F, b3[1] >> 4
+    mnc1, mnc2 = b3[2] & 0x0F, b3[2] >> 4
+    mcc = f"{mcc1}{mcc2}{mcc3}"
+    mnc = f"{mnc1}{mnc2}" if mnc3 == 0x0F else f"{mnc3}{mnc1}{mnc2}"
+    return mcc + mnc
+
+
+def plmn_list(raw, step=5, with_act=False):
+    out = []
+    for i in range(0, len(raw) - step + 1, step):
+        p = dec_plmn(raw[i:i + 3])
+        if p:
+            out.append(p + (f"/{raw[i + 3:i + 5].hex().upper()}" if with_act else ""))
+    return out
+
+
 def decode_smsp(rec):
-    """Tolerant: some cards store alpha as raw ASCII with no length prefix."""
     if not rec:
         return None
     alpha = ""
@@ -86,8 +121,8 @@ def decode_smsp(rec):
             digits = bcd(rec[i + 1:j]).rstrip("F")
             if len(digits) >= 6 and digits.isdigit():
                 prefix = "+" if (rec[i] & 0x70) == 0x10 else ""
-                return {"alpha": alpha, "ton_npi": rec[i], "digits": len(digits),
-                        "smsc": prefix + digits, "tp_pid": 0}
+                return {"alpha": alpha, "ton_npi": rec[i],
+                        "digits": len(digits), "smsc": prefix + digits}
     return None
 
 
@@ -104,52 +139,111 @@ def main():
     sim.select("3F00")
     print("ICCID :", bcd(sim.read_bin("2FE2", 10)).rstrip("F"))
 
-    sim.select("7F20")
-    d = sim.read_bin("6F07", 9)
-    if d:
-        print("IMSI  :", swap_imsi(d[1:1 + d[0]]))
+    # Which application root holds the subscription? USIM -> 7FD0,
+    # 2G SIM -> 7F20, some cards -> 7FFF.
+    root, imsi = None, ""
+    for fid in ("7FD0", "7FFF", "7F20"):
+        sim.select("3F00")
+        if not sim.select(fid):
+            continue
+        d = sim.read_bin("6F07", 9)
+        if d and len(d) >= 9:
+            root, imsi = fid, swap_imsi(d[1:1 + d[0]])
+            break
+    print(f"USIM  : {'ADF at ' + root if root else 'not reachable by FID'}   IMSI: {imsi or '-'}")
+
+    if not root:
+        for aid in USIM_AIDS:
+            ok, sw = sim.select_aid(aid)
+            print(f"        AID {aid}: {sw}")
+            if ok:
+                break
+    else:
+        # confirm what the AID route says, it matters for a phone
+        res = []
+        for aid in USIM_AIDS:
+            ok, sw = sim.select_aid(aid)
+            res.append(f"{aid[-6:]}={sw}")
+            if ok:
+                break
+        print("        AID select:", "  ".join(res))
+
+    if not root:
+        print("        USIM/GSM application 都选不上 —— 卡不会给手机提供服务")
+        ph.close()
+        return 1
+
+    sim.select("3F00")
+    sim.select(root)
 
     d = sim.read_bin("6F78", 2)
     if d:
         print("ACC   :", d.hex().upper())
-
     d = sim.read_bin("6FAD", 4)
     if d:
         print("EF_AD :", d.hex(" ").upper(),
               f"(MNC len={d[0] & 0x0F}, OPLMN={d[1:4].hex().upper()})")
-
     d = sim.read_bin("6F46", 17)
     if d:
         raw = d[1:].rstrip(b"\xFF")
         while raw and raw[0] < 0x20:
             raw = raw[1:]
         print("SPN   :", raw.decode("latin-1", "replace"))
-
     d = sim.read_bin("6F7B", 12)
     if d:
-        print("FPLMN :", " ".join(
-            d[i:i + 3].hex().upper()
-            for i in range(0, len(d), 3)
-            if d[i:i + 3] != b"\xff\xff\xff"))
+        print("FPLMN :", " ".join(plmn_list(d, 3)) or "(none)")
+    d = sim.read_bin("6F60", 170)
+    if d:
+        print("PLMNSEL:", " ".join(plmn_list(d)) or "(none)")
+    d = sim.read_bin("6F62", 250)
+    if d:
+        print("HPLMN :", " ".join(plmn_list(d)) or "(none)")
+    d = sim.read_bin("6F38", 15)
+    if d:
+        print("UST   :", d.hex().upper())
+    d = sim.read_bin("6F08", 33)
+    if d:
+        # EF.KEYS is 33 bytes: key-set version + K + OPc in the SAIP layout, but
+        # in a downloaded profile it is left as 07 FF*32 -- the eUICC's
+        # personalisation agent takes the real keys from the A4 akaParameter
+        # element and keeps them in the applet, never in this file. So an
+        # all-FF tail here is normal and says nothing about whether the keys work.
+        tail = d[1:].rstrip(b"\xff")
+        print("KEYS  :", d.hex().upper(),
+              "  (07 FF*32 = 未个人化，正常)" if not tail else "")
+
+    sim.select("3F00")
+    d = sim.read_bin("FF03", 5)
+    if d:
+        print("R1-R5 :", d.hex().upper())
 
     smsp = None
-    for df in ("7F10", "7F20"):
+    for df in ("7FD0", "7F10", "7F20"):
+        sim.select("3F00")
         if sim.select(df):
             smsp = decode_smsp(sim.read_rec("6F42", 1, 0x24))
             if smsp:
                 break
     if smsp:
-        print(f"SMSP  : {smsp['smsc']}  (alpha='{smsp['alpha']}' "
-              f"TON/NPI={smsp['ton_npi']:#04x} digits={smsp['digits']} "
-              f"TP-PID={smsp['tp_pid']:#04x})")
-    else:
-        print("SMSP  : (EF 6F42 not present on this card)")
+        print(f"SMSP  : {smsp['smsc']}  (alpha='{smsp['alpha']}')")
 
+    sim.select("3F00")
+    sim.select(root)
     d = sim.read_rec("6F40", 1, 0x22)
     if d:
         al = d[0]
-        num = bcd(d[2 + al:]).rstrip("F")
-        print("MSISDN:", num or "(empty)")
+        print("MSISDN:", bcd(d[2 + al:]).rstrip("F") or "(empty)")
+
+    if DO_AUTH:
+        sim.select("3F00")
+        sim.select(root)
+        rand = bytes(range(16))
+        # case 4: Lc=16 RAND, Le=12 (SRES 4 + Kc 8)
+        apdu = bytes([0xA0, 0x88, 0x00, 0x00, 0x10]) + rand + bytes([12])
+        payload, sw = ph.transceive(apdu)
+        print(f"AUTH  : {sw.hex().upper()}  {payload.hex().upper() or '(empty)'}"
+              f"   <- SRES(4)+Kc(8); 有返回只说明 applet 活着且有一把密钥，"
+              f"不说明这把密钥是对的")
 
     if ph.echo_errors:
         print(f"        (echo errors: {ph.echo_errors})")

@@ -1,5 +1,6 @@
 # Vendored osmocom pysim (full clone with its own .git) and its generated state.
-# The tools here no longer import it; only start-smdpp.bat needs it, optionally.
+# diff_card.py, mk_cmcc_ff03.py and verify_profile_der.py import pySim from here,
+# so it is required for them -- not just an optional extra for start-smdpp.bat.
 pysim/
 smdpp-data/
 
@@ -14,3 +15,11 @@ uv.lock
 *.log
 *.pcap
 euicc_probe.log
+
+# Generated profile packages / BPP captures.
+# Every one of these embeds a real ICCID + IMSI (BCD-encoded), so they stay local.
+gfm_ff03.der
+cmcc_ff03.der
+load_result.bin
+bpp*.bin
+*.bpp
